@@ -1,0 +1,14 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Credentials and tokens
+credentials.json
+token.json
+
+# Environment files
+.env
+
+# Local uploads
+uploads/

@@ -1,3 +1,50 @@
+import os
+import json
+import re
+import warnings
+import io
+import contextlib
+import datetime
+import uuid
+import webbrowser
+from datetime import datetime, timezone
+
+# Load environment variables from .env file using python-dotenv
+from dotenv import load_dotenv
+load_dotenv()
+
+# Silence deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# External imports
+from openai import OpenAI
+from pvrecorder import PvRecorder
+from playsound import playsound
+from IPython.display import Image, display
+
+# Flask and related modules
+from flask import Flask, render_template, request, redirect, url_for, flash
+from werkzeug.utils import secure_filename
+
+# Google OAuth and Calendar Imports
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+# OCR and file conversion Imports
+from PIL import Image as PILImage
+import pytesseract
+from pdf2image import convert_from_path
+from docx2pdf import convert
+
+# Time zone imports
+from tzlocal import get_localzone
+from zoneinfo import ZoneInfo
+
+from flask import Flask, render_template, request, flash, session, redirect, url_for
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+
 # ------------------------------
 # Google Calendar API Utilities
 # ------------------------------

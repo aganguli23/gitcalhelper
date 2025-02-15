@@ -1,210 +1,148 @@
-import os
-import json
-import re
-import warnings
-import io
-import contextlib
-import datetime
-import uuid
-import webbrowser
-from datetime import datetime, timezone
-
-# Load environment variables from .env file using python-dotenv
-from dotenv import load_dotenv
-load_dotenv()
-
-# Silence deprecation warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
-# External imports
-from openai import OpenAI
-from pvrecorder import PvRecorder
-from playsound import playsound
-from IPython.display import Image, display
-
-# Flask and related modules
-from flask import Flask, render_template, request, redirect, url_for, flash
-from werkzeug.utils import secure_filename
-
-# Google OAuth and Calendar Imports
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
-# OCR and file conversion Imports
-from PIL import Image as PILImage
-import pytesseract
-from pdf2image import convert_from_path
-from docx2pdf import convert
-
-# Time zone imports
-from tzlocal import get_localzone
-from zoneinfo import ZoneInfo
-
-# Define the scope for Google Calendar API (read/write access)
-SCOPES = ['https://www.googleapis.com/auth/calendar']
-
-# Initialize Flask app and set secret key from environment variables
-app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev_secret_key")
-UPLOAD_FOLDER = 'uploads'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
-
-# Allowed file extensions for upload
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'docx'}
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
 # ------------------------------
 # Google Calendar API Utilities
 # ------------------------------
-def create_credentials_file():
-    """
-    Create credentials.json using environment variables.
-    If the file already exists, leave it intact.
-    """
-    if not os.path.exists('credentials.json'):
-        # Read sensitive credential values from environment variables
-        google_client_id = os.environ.get("GOOGLE_CLIENT_ID")
-        google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
-        google_project_id = os.environ.get("GOOGLE_PROJECT_ID", "your_project_id")
+from flask import session
 
-        if not google_client_id or not google_client_secret:
-            raise Exception("Google client ID and/or client secret are not set in environment variables!")
-        
-        credentials_data = {
-            "installed": {
-                "client_id": google_client_id,
-                "project_id": google_project_id,
-                "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                "client_secret": google_client_secret,
-                "redirect_uris": [
-                    "urn:ietf:wg:oauth:2.0:oob",
-                    "http://localhost"
-                ]
+# Define the redirect URI for OAuth
+# Load Google OAuth credentials from environment variables
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID")
+GOOGLE_AUTH_URI = os.getenv("GOOGLE_AUTH_URI")
+GOOGLE_TOKEN_URI = os.getenv("GOOGLE_TOKEN_URI")
+GOOGLE_AUTH_PROVIDER_CERT = os.getenv("GOOGLE_AUTH_PROVIDER_CERT")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")  
+
+def is_authenticated():
+    """Check if the user is authenticated by verifying the presence of token.json."""
+    return os.path.exists("token.json")
+
+
+@app.route("/auth")
+def auth():
+    """Start the OAuth flow by redirecting the user to Google's authorization URL."""
+    flow = Flow.from_client_secrets_file(
+        'credentials.json',
+        scopes=SCOPES,
+        redirect_uri=GOOGLE_OAUTH_REDIRECT_URI
+    )
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent'
+    )
+    session['auth_state'] = state  # Save the state in the session for later verification
+    return redirect(authorization_url)
+
+
+@app.route("/oauth2callback")
+def oauth2callback():
+    """Handle the OAuth callback and save the credentials in token.json."""
+    state = session.get('auth_state')
+    if not state:
+        flash("Authentication state is missing. Please try again.")
+        return redirect(url_for('index'))
+    
+    flow = Flow.from_client_secrets_file(
+        'credentials.json',
+        scopes=SCOPES,
+        redirect_uri=GOOGLE_OAUTH_REDIRECT_URI
+    )
+    flow.fetch_token(authorization_response=request.url)
+
+    creds = flow.credentials
+    if not creds:
+        flash("Failed to fetch credentials. Please try again.")
+        return redirect(url_for('index'))
+
+    # Save the credentials to token.json
+    with open('token.json', 'w') as token_file:
+        token_file.write(creds.to_json())
+
+    flash("Successfully authenticated with Google!")
+    return redirect(url_for('index'))
+
+
+def load_credentials():
+    """Load credentials from token.json if available."""
+    if not is_authenticated():
+        return None
+    return Credentials.from_authorized_user_file('token.json', SCOPES)
+
+
+# Replace the old `authenticate()` function with `load_credentials()` usage
+def create_calendar_event(event_title, start_dt, end_dt, with_meet=False):
+    """Create a Google Calendar event with an optional Google Meet link."""
+    creds = load_credentials()
+    if creds is None:
+        flash("Please authenticate with Google first.")
+        return redirect(url_for("auth"))
+
+    service = build('calendar', 'v3', credentials=creds)
+    local_tz = get_localzone()
+    start_local = start_dt.astimezone(local_tz)
+    end_local = end_dt.astimezone(local_tz)
+
+    event = {
+        'summary': event_title,
+        'description': 'Automatically created event via Calendar API.',
+        'start': {
+            'dateTime': start_local.isoformat(),
+            'timeZone': str(local_tz)
+        },
+        'end': {
+            'dateTime': end_local.isoformat(),
+            'timeZone': str(local_tz)
+        },
+        'reminders': {
+            'useDefault': False,
+            'overrides': [
+                {'method': 'popup', 'minutes': 10},
+                {'method': 'popup', 'minutes': 60},
+                {'method': 'popup', 'minutes': 1440}
+            ]
+        }
+    }
+
+    if with_meet:
+        event['conferenceData'] = {
+            'createRequest': {
+                'requestId': str(uuid.uuid4()),
+                'conferenceSolutionKey': {'type': 'hangoutsMeet'}
             }
         }
-        with open('credentials.json', 'w') as f:
-            json.dump(credentials_data, f, indent=4)
-        print("credentials.json created successfully!")
+
+    created_event = service.events().insert(
+        calendarId='primary',
+        body=event,
+        conferenceDataVersion=1
+    ).execute()
+
+    print("Event created successfully!")
+    print("Event link:", created_event.get('htmlLink'))
+    webbrowser.open(created_event.get('htmlLink'))
+    return created_event
+
+
+# ------------------------------
+# Flask Routes
+# ------------------------------
+@app.route("/")
+def index():
+    """Home route to check authentication and display the main page."""
+    if not is_authenticated():
+        flash("Please authenticate with Google to use the app.")
+        return redirect(url_for("auth"))
+    return render_template("index.html")
+
+
+@app.route("/check-auth")
+def check_auth():
+    """Route to check if the user is authenticated."""
+    if is_authenticated():
+        return "You are authenticated!"
     else:
-        print("credentials.json already exists.")
-
-
-def authenticate():
-    """
-    Authenticate with Google Calendar using OAuth and return credentials.
-    """
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-        try:
-            # Launch a local server for OAuth
-            creds = flow.run_local_server(port=0)
-        except Exception:
-            print("Error launching local server for authentication, falling back to console input.")
-            creds = flow.run_console()
-        with open('token.json', 'w') as token_file:
-            token_file.write(creds.to_json())
-        print("token.json created successfully!")
-    return creds
-
-
-# ------------------------------
-# OCR Functionality with Page Selection
-# ------------------------------
-def ocr_image(file_path_or_object, selected_pages=None):
-    """
-    Perform OCR on a file (image, PDF, or DOCX).
-    If selected_pages is provided, only process those pages (1-indexed).
-    """
-    try:
-        if isinstance(file_path_or_object, str):
-            if file_path_or_object.lower().endswith(".pdf"):
-                pdf_images = convert_from_path(file_path_or_object, dpi=300)
-                if selected_pages:
-                    filtered_images = []
-                    for page_num in selected_pages:
-                        if 1 <= page_num <= len(pdf_images):
-                            filtered_images.append(pdf_images[page_num - 1])
-                    pdf_images = filtered_images
-
-                extracted_text = ""
-                for page_number, image in enumerate(pdf_images, start=1):
-                    print(f"Processing page {page_number} from PDF...")
-                    page_text = pytesseract.image_to_string(image)
-                    extracted_text += f"--- Page {page_number} ---\n{page_text}\n"
-                print("OCR extracted text from PDF:", extracted_text)
-                return extracted_text
-
-            elif file_path_or_object.lower().endswith(".docx"):
-                temp_pdf = file_path_or_object.rsplit('.', 1)[0] + '_temp.pdf'
-                print(f"Converting DOCX to PDF: {file_path_or_object} -> {temp_pdf}")
-                try:
-                    convert(file_path_or_object, temp_pdf)
-                    print("DOCX conversion successful.")
-                except Exception as e:
-                    print(f"Error during DOCX to PDF conversion: {e}")
-                    return ""
-                pdf_images = convert_from_path(temp_pdf, dpi=300)
-                if selected_pages:
-                    filtered_images = []
-                    for page_num in selected_pages:
-                        if 1 <= page_num <= len(pdf_images):
-                            filtered_images.append(pdf_images[page_num - 1])
-                    pdf_images = filtered_images
-
-                extracted_text = ""
-                for page_number, image in enumerate(pdf_images, start=1):
-                    print(f"Processing page {page_number} from DOCX (converted PDF)...")
-                    page_text = pytesseract.image_to_string(image)
-                    extracted_text += f"--- Page {page_number} ---\n{page_text}\n"
-                os.remove(temp_pdf)
-                print("OCR extracted text from DOCX:", extracted_text)
-                return extracted_text
-
-            else:
-                # Assume the file is an image
-                image = PILImage.open(file_path_or_object)
-                text = pytesseract.image_to_string(image)
-                print("OCR extracted text from image:", text)
-                return text
-
-        else:
-            # Process a file-like object as an image
-            image = PILImage.open(file_path_or_object)
-            text = pytesseract.image_to_string(image)
-            print("OCR extracted text from image:", text)
-            return text
-
-    except Exception as e:
-        print("Error during OCR:", e)
-        return ""
-
-
-# ------------------------------
-# Input Combination Function
-# ------------------------------
-def combine_inputs(user_input, ocr_text):
-    """
-    Combine the single text input with OCR extracted text.
-    """
-    combined_parts = []
-    if user_input:
-        combined_parts.append(user_input)
-    if ocr_text:
-        combined_parts.append(ocr_text)
-    return " ".join(combined_parts)
-
+        return "You are NOT authenticated. Please authenticate at /auth."
 
 # ------------------------------
 # GPT-4o Chatbot Class
